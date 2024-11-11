@@ -1,0 +1,215 @@
+name: 'GitFlow Automation'
+description: 'Automates GitFlow release process including version management and PR creation'
+author: 'Your Name'
+
+branding:
+  icon: 'git-branch'
+  color: 'blue'
+
+inputs:
+  github-token:
+    description: 'GitHub token with repository access'
+    required: true
+  version-files:
+    description: 'Comma-separated list of files to update version in (e.g., package.json,VERSION)'
+    required: false
+    default: 'VERSION'
+  version-regex:
+    description: 'Regex pattern to find version in files'
+    required: false
+    default: 'version": "(.*)"'
+  base-branch:
+    description: 'Base branch for the release PR (usually main)'
+    required: false
+    default: 'main'
+  develop-branch:
+    description: 'Development branch name'
+    required: false
+    default: 'develop'
+
+outputs:
+  new-version:
+    description: 'The new version number created'
+  release-branch:
+    description: 'The name of the created release branch'
+  version-bump:
+    description: 'Type of version bump performed (major/minor/patch)'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Git
+      shell: bash
+      run: |
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+
+    - name: Get merged PR information
+      id: pr_info
+      shell: bash
+      run: |
+        PR_NUMBER=$(git log -1 --pretty=%B | grep -oP '#\K\d+')
+        if [ -z "$PR_NUMBER" ]; then
+          echo "No PR number found in the commit message."
+          exit 1
+        fi
+        PR_INFO=$(curl -s -H "Authorization: token ${{ inputs.github-token }}" \
+                  "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER")
+        echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+        echo "pr_title=$(echo $PR_INFO | jq -r .title)" >> $GITHUB_OUTPUT
+        echo "pr_labels=$(echo $PR_INFO | jq -r '[.labels[].name] | join(",")')" >> $GITHUB_OUTPUT
+
+    - name: Determine version bump
+      id: bump
+      shell: bash
+      run: |
+        LABELS="${{ steps.pr_info.outputs.pr_labels }}"
+        if [[ $LABELS == *"major"* ]]; then
+          echo "bump=major" >> $GITHUB_OUTPUT
+        elif [[ $LABELS == *"minor"* ]]; then
+          echo "bump=minor" >> $GITHUB_OUTPUT
+        else
+          echo "bump=patch" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Calculate new version
+      id: version
+      shell: bash
+      run: |
+        CURRENT_VERSION=$(git tag -l "v*" --sort=-v:refname | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+($|-)" | head -n1)
+        if [ -z "$CURRENT_VERSION" ]; then
+          CURRENT_VERSION="v0.0.0"
+        fi
+        echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+        
+        VERSION_REGEX="^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z-]+)?(\+[0-9A-Za-z-]+)?$"
+        if [[ $CURRENT_VERSION =~ $VERSION_REGEX ]]; then
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          patch="${BASH_REMATCH[3]}"
+          prerelease="${BASH_REMATCH[4]}"
+          buildmetadata="${BASH_REMATCH[5]}"
+        else
+          echo "Error: Invalid version format"
+          exit 1
+        fi
+        
+        case "${{ steps.bump.outputs.bump }}" in
+          major)
+            major=$((major + 1))
+            minor=0
+            patch=0
+            prerelease=""
+            ;;
+          minor)
+            minor=$((minor + 1))
+            patch=0
+            prerelease=""
+            ;;
+          patch)
+            patch=$((patch + 1))
+            prerelease=""
+            ;;
+        esac
+        
+        NEW_VERSION="v$major.$minor.$patch$prerelease$buildmetadata"
+        echo "new=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+    - name: Create release branch
+      shell: bash
+      run: |
+        NEW_VERSION=${{ steps.version.outputs.new }}
+        git checkout -b release/$NEW_VERSION
+
+    - name: Update version files
+      shell: bash
+      run: |
+        NEW_VERSION=${{ steps.version.outputs.new }}
+        IFS=',' read -ra FILES <<< "${{ inputs.version-files }}"
+        for file in "${FILES[@]}"; do
+          if [ -f "$file" ]; then
+            if [[ "$file" == *"package.json" ]]; then
+              sed -i 's/"version": ".*"/"version": "'${NEW_VERSION#v}'"/g' "$file"
+            else
+              echo "$NEW_VERSION" > "$file"
+            fi
+          fi
+        done
+
+    - name: Commit changes
+      id: commit
+      shell: bash
+      run: |
+        git add .
+        if ! git diff-index --quiet HEAD; then
+          git commit -m "Bump version to ${{ steps.version.outputs.new }}"
+          echo "changes_made=true" >> $GITHUB_OUTPUT
+        else
+          echo "No changes to commit"
+          echo "changes_made=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Push release branch
+      shell: bash
+      run: |
+        git push origin release/${{ steps.version.outputs.new }} || \
+        (git pull --rebase origin release/${{ steps.version.outputs.new }} && \
+        git push origin release/${{ steps.version.outputs.new }})
+
+    - name: Create Pull Request to main
+      if: steps.commit.outputs.changes_made == 'true'
+      shell: bash
+      run: |
+        PR_BODY="This PR is automatically generated to merge the release ${{ steps.version.outputs.new }} into main.
+        
+        Changes in this release:
+        ${{ steps.pr_info.outputs.pr_title }}"
+        
+        curl -X POST \
+          -H "Authorization: token ${{ inputs.github-token }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/${{ github.repository }}/pulls \
+          -d "{
+            \"title\": \"Release ${{ steps.version.outputs.new }}\",
+            \"body\": $(echo "$PR_BODY" | jq -R -s .),
+            \"head\": \"release/${{ steps.version.outputs.new }}\",
+            \"base\": \"${{ inputs.base-branch }}\"
+          }"
+
+    - name: Create GitHub Release
+      if: steps.commit.outputs.changes_made == 'true'
+      shell: bash
+      run: |
+        RELEASE_BODY="Changes in this release:
+        ${{ steps.pr_info.outputs.pr_title }}"
+        
+        curl -X POST \
+          -H "Authorization: token ${{ inputs.github-token }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/${{ github.repository }}/releases \
+          -d "{
+            \"tag_name\": \"${{ steps.version.outputs.new }}\",
+            \"name\": \"Release ${{ steps.version.outputs.new }}\",
+            \"body\": $(echo "$RELEASE_BODY" | jq -R -s .),
+            \"draft\": false,
+            \"prerelease\": false
+          }"
+
+    - name: Create Pull Request to develop
+      if: steps.commit.outputs.changes_made == 'true'
+      shell: bash
+      run: |
+        PR_BODY="This PR is automatically generated to merge the release changes back into develop.
+        
+        Release: ${{ steps.version.outputs.new }}"
+        
+        curl -X POST \
+          -H "Authorization: token ${{ inputs.github-token }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/${{ github.repository }}/pulls \
+          -d "{
+            \"title\": \"Merge release ${{ steps.version.outputs.new }} back to develop\",
+            \"body\": $(echo "$PR_BODY" | jq -R -s .),
+            \"head\": \"release/${{ steps.version.outputs.new }}\",
+            \"base\": \"${{ inputs.develop-branch }}\"
+          }"
