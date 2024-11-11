@@ -1,11 +1,49 @@
 # GitFlow Automation Action 🔄
 
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/raultoto/gitflow-automation)](https://github.com/raultoto/gitflow-automation/releases)
-[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-GitFlow%20Automation-blue)](https://github.com/marketplace/actions/gitflow-automation)
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/raultoto/gitflow_automation)](https://github.com/raultoto/gitflow_automation/releases)
+[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-GitFlow%20Automation-blue)](https://github.com/marketplace/actions/gitflow_automation)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Automate your GitFlow release process with this GitHub Action. It handles version management, branch creation, and pull request generation following GitFlow conventions.
+## ⚠️ Prerequisites
 
+This action requires [PR Auto Classifier](https://github.com/marketplace/actions/pr-auto-classifier) to be installed in your repository. The PR Auto Classifier automatically labels your PRs with version bump tags (`major`, `minor`, `patch`) which this action uses to determine version increments.
+
+### Setting up PR Auto Classifier
+
+Add this workflow to your repository at `.github/workflows/pr-classification.yml`:
+
+```yaml
+name: PR Classification
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  classify-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+          
+      - name: Classify PR
+        uses: raultoto/pr_auto_classifier@v1.0.1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+This will:
+- 🏷️ Automatically classify your PRs based on size
+- 📝 Add labels for file types changed
+- 📦 Determine version bump type (major/minor/patch)
+- 💬 Add a comment with classification details
+
+The generated labels will then be used by the GitFlow Automation action to determine the appropriate version bump during the release process.
 ## 🌟 Features
 
 - 🔄 **Automated GitFlow Process**: Streamlines the entire release workflow
@@ -53,7 +91,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run GitFlow Automation
-        uses: raultoto/gitflow-automation@v1
+        uses: raultoto/gitflow_automation@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           version-files: "package.json,VERSION"
