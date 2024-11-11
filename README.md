@@ -1,10 +1,11 @@
 # GitFlow Automation Action 🔄
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/raultoto/gitflow_automation)](https://github.com/raultoto/gitflow_automation/releases)
-[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-GitFlow%20Automation-blue)](https://github.com/marketplace/actions/gitflow_automation)
+[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-GitFlow%20Automation-blue)](https://github.com/marketplace/actions/gitflow-automation)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Automate your GitFlow release process with this GitHub Action. It handles version management, branch creation, and pull request generation following GitFlow conventions.
+
 ## ⚠️ Prerequisites
 
 This action requires [PR Auto Classifier](https://github.com/marketplace/actions/pr-auto-classifier) to be installed in your repository. The PR Auto Classifier automatically labels your PRs with version bump tags (`major`, `minor`, `patch`) which this action uses to determine version increments.
@@ -43,28 +44,28 @@ This will:
 - 📦 Determine version bump type (major/minor/patch)
 - 💬 Add a comment with classification details
 
-The generated labels will then be used by the GitFlow Automation action to determine the appropriate version bump during the release process.
 ## 🌟 Features
 
 - 🔄 **Automated GitFlow Process**: Streamlines the entire release workflow
-- 📦 **Smart Version Bumping**: Automatically determines version increments based on PR labels
+- 📦 **Smart Version Bumping**: Automatically determines version increments based on PR labels from PR Auto Classifier
 - 🏷️ **Semantic Versioning**: Follows SemVer conventions for version management
 - 🔀 **Branch Management**: Creates and manages release branches automatically
 - 📝 **Documentation**: Generates release notes and PR descriptions
 - 🤝 **Pull Request Creation**: Automatically creates PRs for main and develop branches
 - 📋 **Version File Updates**: Updates version numbers in multiple file types
 
-## 📊 GitFlow Process
+## 📊 Complete Workflow
 
 ```mermaid
 graph TD
-    A[Push to Develop] -->|Triggers Action| B[Analyze PR Labels]
-    B -->|Determine Version Bump| C[Calculate New Version]
-    C -->|Create Branch| D[Release Branch]
-    D -->|Update Files| E[Version Files]
-    E -->|Create PRs| F[PR to Main]
-    E -->|Create PRs| G[PR to Develop]
-    F -->|On Merge| H[Create Release]
+    A[PR Created/Updated] -->|PR Auto Classifier| B[PR Labeled]
+    B -->|PR Merged to Develop| C[GitFlow Automation]
+    C -->|Read Labels| D[Determine Version Bump]
+    D -->|Calculate Version| E[Create Release Branch]
+    E -->|Update Files| F[Version Files]
+    F -->|Create PRs| G[PR to Main]
+    F -->|Create PRs| H[PR to Develop]
+    G -->|On Merge| I[Create Release]
 ```
 
 ## 🚀 Usage
@@ -128,25 +129,38 @@ The action supports various version file formats:
 v1.0.0
 ```
 
-## 🏷️ PR Labels and Version Bumping
+## 🏷️ Version Bumping
 
-The action uses PR labels to determine the version bump:
+The action uses labels from PR Auto Classifier to determine the version bump:
 
-| Label | Version Bump | Example |
-|-------|-------------|---------|
-| `major` | Major version | 1.0.0 → 2.0.0 |
-| `minor` | Minor version | 1.0.0 → 1.1.0 |
-| `patch` | Patch version | 1.0.0 → 1.0.1 |
+| Label | Version Bump | Example | When to Use |
+|-------|-------------|---------|-------------|
+| `major` | Major version | 1.0.0 → 2.0.0 | Breaking changes |
+| `minor` | Minor version | 1.0.0 → 1.1.0 | New features |
+| `patch` | Patch version | 1.0.0 → 1.0.1 | Bug fixes |
 
-## 🔄 Workflow Steps
+## 🔄 Complete Workflow Steps
 
-1. **Trigger**: Action runs when code is pushed to develop branch
-2. **Analysis**: Determines required version bump from PR labels
-3. **Version**: Calculates new version number
-4. **Branch**: Creates new release branch
-5. **Update**: Updates version in specified files
-6. **PRs**: Creates pull requests to main and develop
-7. **Release**: Creates GitHub release with notes
+1. **PR Creation**:
+   - Create a PR targeting develop
+   - PR Auto Classifier analyzes and labels the PR
+   
+2. **Merge to Develop**:
+   - PR is merged into develop branch
+   - GitFlow Automation is triggered
+
+3. **Version Management**:
+   - Reads labels from merged PR
+   - Determines version bump type
+   - Calculates new version number
+
+4. **Release Process**:
+   - Creates release branch
+   - Updates version files
+   - Creates PR to main
+   - Creates PR back to develop
+   - Generates GitHub release
+
 
 
 ## 📄 License
@@ -155,10 +169,19 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 👥 Author
 
-Your Name ([@raultoto](https://github.com/raultoto))
+raultoto ([@raultoto](https://github.com/raultoto))
 
 ## 🙏 Acknowledgements
 
 - Inspired by GitFlow workflow practices
 - Built with GitHub Actions
 - Uses Semantic Versioning
+- Integrates with PR Auto Classifier
+
+## 🤝 Related Actions
+
+- [PR Auto Classifier](https://github.com/marketplace/actions/pr-auto-classifier): Required companion action for automated PR labeling
+
+## ⭐ Show your support
+
+Give a ⭐️ if this project helped you!
