@@ -133,9 +133,15 @@ runs:
       shell: bash
       run: |
         NEW_VERSION=${{ steps.version.outputs.new }}
+        
+        # Siempre crear/actualizar el archivo VERSION
+        mkdir -p $(dirname VERSION)
+        echo "${NEW_VERSION#v}" > VERSION
+        
+        # Actualizar otros archivos si existen
         IFS=',' read -ra FILES <<< "${{ inputs.version-files }}"
         for file in "${FILES[@]}"; do
-          if [ -f "$file" ]; then
+          if [ -f "$file" ] && [ "$file" != "VERSION" ]; then
             if [[ "$file" == *"package.json" ]]; then
               sed -i 's/"version": ".*"/"version": "'${NEW_VERSION#v}'"/g' "$file"
             else
@@ -144,18 +150,25 @@ runs:
           fi
         done
 
-    - name: Commit version bump
+    - name: Commit version bump and tag
       id: commit
       shell: bash
       run: |
+        # Añadir y commitear cambios
+        git add VERSION
         git add .
-        if ! git diff-index --quiet HEAD; then
-          git commit -m "Bump version to ${{ steps.version.outputs.new }}"
+        
+        if git diff-index --quiet HEAD; then
+          echo "No hay cambios en los archivos, pero continuaremos con el release"
           echo "changes_made=true" >> $GITHUB_OUTPUT
         else
-          echo "No changes to commit"
-          echo "changes_made=false" >> $GITHUB_OUTPUT
+          git commit -m "Bump version to ${{ steps.version.outputs.new }}"
+          echo "changes_made=true" >> $GITHUB_OUTPUT
         fi
+        
+        # Crear y pushear el tag
+        git tag ${{ steps.version.outputs.new }}
+        git push origin ${{ steps.version.outputs.new }} || true
 
     - name: Push release branch
       shell: bash
@@ -165,7 +178,6 @@ runs:
         git push origin release/${{ steps.version.outputs.new }})
 
     - name: Create Pull Request to main
-      if: steps.commit.outputs.changes_made == 'true'
       shell: bash
       run: |
         PR_BODY="This PR is automatically generated to merge the release ${{ steps.version.outputs.new }} into main.
@@ -185,26 +197,35 @@ runs:
           }"
 
     - name: Create GitHub Release
-      if: steps.commit.outputs.changes_made == 'true'
       shell: bash
       run: |
+        NEW_VERSION=${{ steps.version.outputs.new }}
+        
         RELEASE_BODY="Changes in this release:
         ${{ steps.pr_info.outputs.pr_title }}"
         
-        curl -X POST \
+        # Intentar crear el release
+        RESPONSE=$(curl -s -X POST \
           -H "Authorization: Bearer ${{ inputs.github-token }}" \
           -H "Accept: application/vnd.github.v3+json" \
           https://api.github.com/repos/${{ github.repository }}/releases \
           -d "{
-            \"tag_name\": \"${{ steps.version.outputs.new }}\",
-            \"name\": \"Release ${{ steps.version.outputs.new }}\",
+            \"tag_name\": \"$NEW_VERSION\",
+            \"name\": \"Release $NEW_VERSION\",
             \"body\": $(echo "$RELEASE_BODY" | jq -R -s .),
             \"draft\": false,
-            \"prerelease\": false
-          }"
+            \"prerelease\": false,
+            \"generate_release_notes\": true
+          }")
+        
+        # Verificar si hubo error
+        if echo "$RESPONSE" | jq -e '.errors' > /dev/null; then
+          echo "Error creating release:"
+          echo "$RESPONSE" | jq '.'
+          exit 1
+        fi
 
     - name: Create Pull Request to develop
-      if: steps.commit.outputs.changes_made == 'true'
       shell: bash
       run: |
         PR_BODY="This PR is automatically generated to merge the release changes back into develop.
