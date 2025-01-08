@@ -17,6 +17,7 @@ runs:
     - name: Setup Git
       shell: bash
       run: |
+        echo "::debug::Setting up git configuration"
         git config user.name github-actions
         git config user.email github-actions@github.com
 
@@ -24,27 +25,46 @@ runs:
       shell: bash
       id: pr_info
       run: |
+        echo "::debug::Extracting PR number from commit message"
         PR_NUMBER=$(git log -1 --pretty=%B | grep -oP '#\K\d+')
         if [ -z "$PR_NUMBER" ]; then
-          echo "No PR number found in the commit message."
+          echo "::error::No PR number found in the commit message."
           exit 1
         fi
+        echo "::debug::Found PR number: $PR_NUMBER"
+        
+        echo "::debug::Fetching PR information from GitHub API"
         PR_INFO=$(curl -s -H "Authorization: token ${{ inputs.github-token }}" \
                   "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER")
+        
+        echo "::debug::PR API Response: $PR_INFO"
+        
+        if [ "$(echo "$PR_INFO" | jq -r '.message')" = "Not Found" ]; then
+          echo "::error::PR not found or API request failed"
+          exit 1
+        fi
+        
         echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
         echo "pr_title=$(echo $PR_INFO | jq -r .title)" >> $GITHUB_OUTPUT
         echo "pr_labels=$(echo $PR_INFO | jq -r '[.labels[].name] | join(",")')" >> $GITHUB_OUTPUT
+        
+        echo "::debug::PR Title: $(echo $PR_INFO | jq -r .title)"
+        echo "::debug::PR Labels: $(echo $PR_INFO | jq -r '[.labels[].name] | join(",")')"
 
     - name: Determine version bump
       shell: bash
       id: bump
       run: |
         LABELS="${{ steps.pr_info.outputs.pr_labels }}"
+        echo "::debug::Processing PR labels: $LABELS"
         if [[ $LABELS == *"major"* ]]; then
+          echo "::debug::Detected major version bump"
           echo "bump=major" >> $GITHUB_OUTPUT
         elif [[ $LABELS == *"minor"* ]]; then
+          echo "::debug::Detected minor version bump"
           echo "bump=minor" >> $GITHUB_OUTPUT
         else
+          echo "::debug::Defaulting to patch version bump"
           echo "bump=patch" >> $GITHUB_OUTPUT
         fi
 
@@ -52,10 +72,13 @@ runs:
       shell: bash
       id: version
       run: |
+        echo "::debug::Getting latest version tag"
         CURRENT_VERSION=$(git tag -l "v*" --sort=-v:refname | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+($|-)" | head -n1)
         if [ -z "$CURRENT_VERSION" ]; then
+          echo "::debug::No version tag found, starting from v0.0.0"
           CURRENT_VERSION="v0.0.0"
         fi
+        echo "::debug::Current version: $CURRENT_VERSION"
         echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
         
         VERSION_REGEX="^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z-]+)?(\+[0-9A-Za-z-]+)?$"
@@ -65,8 +88,9 @@ runs:
           patch="${BASH_REMATCH[3]}"
           prerelease="${BASH_REMATCH[4]}"
           buildmetadata="${BASH_REMATCH[5]}"
+          echo "::debug::Parsed version - major: $major, minor: $minor, patch: $patch"
         else
-          echo "Error: Invalid version format"
+          echo "::error::Invalid version format"
           exit 1
         fi
         
@@ -86,41 +110,56 @@ runs:
         esac
         
         NEW_VERSION="v$major.$minor.$patch$prerelease$buildmetadata"
+        echo "::debug::New version will be: $NEW_VERSION"
         echo "new=$NEW_VERSION" >> $GITHUB_OUTPUT
 
     - name: Create and push release branch
       shell: bash
       run: |
         NEW_VERSION=${{ steps.version.outputs.new }}
+        echo "::debug::Creating release branch for version $NEW_VERSION"
         git checkout -b release/$NEW_VERSION
         
-        # Update version in specified files
+        echo "::debug::Updating version in files"
         IFS=',' read -ra FILES <<< "${{ inputs.version-files }}"
         for file in "${FILES[@]}"; do
           if [ -f "$file" ]; then
+            echo "::debug::Updating version in $file"
             if [ "$file" = "package.json" ]; then
               sed -i 's/"version": ".*"/"version": "'${NEW_VERSION#v}'"/g' "$file"
             else
               echo "$NEW_VERSION" > "$file"
             fi
+          else
+            echo "::warning::File $file not found"
           fi
         done
         
+        echo "::debug::Committing version bump"
         git add .
         git commit -m "Bump version to $NEW_VERSION"
-        git push origin release/$NEW_VERSION
+        
+        echo "::debug::Pushing release branch"
+        git push origin release/$NEW_VERSION || {
+          echo "::error::Failed to push release branch"
+          exit 1
+        }
 
     - name: Create Pull Request to main
       shell: bash
       run: |
         NEW_VERSION=${{ steps.version.outputs.new }}
+        echo "::debug::Creating PR to main for version $NEW_VERSION"
         PR_TITLE="Release $NEW_VERSION"
         PR_BODY="This PR is automatically generated to merge the release $NEW_VERSION into main.
 
         Changes in this release:
         ${{ steps.pr_info.outputs.pr_title }}"
         
-        curl -X POST \
+        echo "::debug::PR Title: $PR_TITLE"
+        echo "::debug::PR Body: $PR_BODY"
+        
+        PR_RESPONSE=$(curl -s -X POST \
           -H "Authorization: token ${{ inputs.github-token }}" \
           -H "Accept: application/vnd.github.v3+json" \
           https://api.github.com/repos/${{ github.repository }}/pulls \
@@ -129,13 +168,22 @@ runs:
             \"body\":\"$PR_BODY\",
             \"head\":\"release/$NEW_VERSION\",
             \"base\":\"main\"
-          }"
+          }")
+        
+        echo "::debug::PR Creation Response: $PR_RESPONSE"
+        
+        if [ "$(echo "$PR_RESPONSE" | jq -r '.message')" != "null" ]; then
+          echo "::error::Failed to create PR: $(echo "$PR_RESPONSE" | jq -r '.message')"
+          exit 1
+        fi
 
     - name: Create GitHub Release
       shell: bash
       run: |
         NEW_VERSION=${{ steps.version.outputs.new }}
-        curl -X POST \
+        echo "::debug::Creating GitHub Release for version $NEW_VERSION"
+        
+        RELEASE_RESPONSE=$(curl -s -X POST \
           -H "Authorization: token ${{ inputs.github-token }}" \
           -H "Accept: application/vnd.github.v3+json" \
           https://api.github.com/repos/${{ github.repository }}/releases \
@@ -145,18 +193,29 @@ runs:
             \"body\":\"Changes in this release:\\n${{ steps.pr_info.outputs.pr_title }}\",
             \"draft\":false,
             \"prerelease\":false
-          }"
+          }")
+        
+        echo "::debug::Release Creation Response: $RELEASE_RESPONSE"
+        
+        if [ "$(echo "$RELEASE_RESPONSE" | jq -r '.message')" != "null" ]; then
+          echo "::error::Failed to create release: $(echo "$RELEASE_RESPONSE" | jq -r '.message')"
+          exit 1
+        fi
 
     - name: Create Pull Request to develop
       shell: bash
       run: |
         NEW_VERSION=${{ steps.version.outputs.new }}
+        echo "::debug::Creating PR to develop for version $NEW_VERSION"
         PR_TITLE="Merge release $NEW_VERSION back to develop"
         PR_BODY="This PR is automatically generated to merge the release changes back into develop.
 
         Release: $NEW_VERSION"
         
-        curl -X POST \
+        echo "::debug::PR Title: $PR_TITLE"
+        echo "::debug::PR Body: $PR_BODY"
+        
+        PR_RESPONSE=$(curl -s -X POST \
           -H "Authorization: token ${{ inputs.github-token }}" \
           -H "Accept: application/vnd.github.v3+json" \
           https://api.github.com/repos/${{ github.repository }}/pulls \
@@ -165,7 +224,14 @@ runs:
             \"body\":\"$PR_BODY\",
             \"head\":\"release/$NEW_VERSION\",
             \"base\":\"develop\"
-          }"
+          }")
+        
+        echo "::debug::PR Creation Response: $PR_RESPONSE"
+        
+        if [ "$(echo "$PR_RESPONSE" | jq -r '.message')" != "null" ]; then
+          echo "::error::Failed to create PR: $(echo "$PR_RESPONSE" | jq -r '.message')"
+          exit 1
+        fi
 
 branding:
   icon: 'git-branch'
