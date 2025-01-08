@@ -1,4 +1,4 @@
-name: 'GitFlow Automation'
+name: 'GitFlow Automation Using PR Auto Classifier Action'
 description: 'Automates GitFlow release process including version management and PR creation'
 author: 'Your Name'
 
