@@ -6,10 +6,6 @@ inputs:
   github-token:
     description: 'GitHub token for authentication'
     required: true
-  version-files:
-    description: 'Comma-separated list of files to update version in (e.g., package.json)'
-    required: false
-    default: 'package.json'
 
 runs:
   using: 'composite'
@@ -37,8 +33,6 @@ runs:
         PR_INFO=$(curl -s -H "Authorization: token ${{ inputs.github-token }}" \
                   "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER")
         
-        echo "::debug::PR API Response: $PR_INFO"
-        
         if [ "$(echo "$PR_INFO" | jq -r '.message')" = "Not Found" ]; then
           echo "::error::PR not found or API request failed"
           exit 1
@@ -47,9 +41,6 @@ runs:
         echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
         echo "pr_title=$(echo $PR_INFO | jq -r .title)" >> $GITHUB_OUTPUT
         echo "pr_labels=$(echo $PR_INFO | jq -r '[.labels[].name] | join(",")')" >> $GITHUB_OUTPUT
-        
-        echo "::debug::PR Title: $(echo $PR_INFO | jq -r .title)"
-        echo "::debug::PR Labels: $(echo $PR_INFO | jq -r '[.labels[].name] | join(",")')"
 
     - name: Determine version bump
       shell: bash
@@ -58,13 +49,10 @@ runs:
         LABELS="${{ steps.pr_info.outputs.pr_labels }}"
         echo "::debug::Processing PR labels: $LABELS"
         if [[ $LABELS == *"major"* ]]; then
-          echo "::debug::Detected major version bump"
           echo "bump=major" >> $GITHUB_OUTPUT
         elif [[ $LABELS == *"minor"* ]]; then
-          echo "::debug::Detected minor version bump"
           echo "bump=minor" >> $GITHUB_OUTPUT
         else
-          echo "::debug::Defaulting to patch version bump"
           echo "bump=patch" >> $GITHUB_OUTPUT
         fi
 
@@ -75,11 +63,9 @@ runs:
         echo "::debug::Getting latest version tag"
         CURRENT_VERSION=$(git tag -l "v*" --sort=-v:refname | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+($|-)" | head -n1)
         if [ -z "$CURRENT_VERSION" ]; then
-          echo "::debug::No version tag found, starting from v0.0.0"
           CURRENT_VERSION="v0.0.0"
         fi
         echo "::debug::Current version: $CURRENT_VERSION"
-        echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
         
         VERSION_REGEX="^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z-]+)?(\+[0-9A-Za-z-]+)?$"
         if [[ $CURRENT_VERSION =~ $VERSION_REGEX ]]; then
@@ -88,7 +74,6 @@ runs:
           patch="${BASH_REMATCH[3]}"
           prerelease="${BASH_REMATCH[4]}"
           buildmetadata="${BASH_REMATCH[5]}"
-          echo "::debug::Parsed version - major: $major, minor: $minor, patch: $patch"
         else
           echo "::error::Invalid version format"
           exit 1
@@ -110,147 +95,94 @@ runs:
         esac
         
         NEW_VERSION="v$major.$minor.$patch$prerelease$buildmetadata"
-        echo "::debug::New version will be: $NEW_VERSION"
         echo "new=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-    - name: Create and push release branch
+    - name: Create Release Branch and Tag
       shell: bash
       run: |
         NEW_VERSION=${{ steps.version.outputs.new }}
-        echo "::debug::Creating release branch for version $NEW_VERSION"
+        echo "::debug::Creating release for version $NEW_VERSION"
         
-        # Ensure we're on the latest develop
-        echo "::debug::Fetching latest changes from develop"
-        git fetch origin develop
-        git checkout develop
-        git pull origin develop
+        # Get the current commit SHA
+        COMMIT_SHA=$(git rev-parse HEAD)
+        echo "::debug::Current commit SHA: $COMMIT_SHA"
         
-        echo "::debug::Creating and switching to release branch"
-        git checkout -b release/$NEW_VERSION
-        
-        echo "::debug::Checking for package.json"
-        if [ -f "package.json" ]; then
-          echo "::debug::Found package.json, current contents:"
-          cat package.json
-          
-          echo "::debug::Updating version in package.json"
-          # Use perl instead of sed for better cross-platform compatibility
-          perl -i -pe 's/"version": ".*"/"version": "'${NEW_VERSION#v}'"/' package.json
-          
-          echo "::debug::Updated package.json contents:"
-          cat package.json
-          
-          echo "::debug::Checking git status"
-          git status
-          
-          echo "::debug::Adding package.json to git"
-          git add package.json
-          
-          echo "::debug::Committing changes"
-          if git diff --cached --quiet; then
-            echo "::warning::No changes detected in package.json, creating empty commit"
-            git commit --allow-empty -m "Release version $NEW_VERSION"
-          else
-            echo "::debug::Changes detected, creating commit"
-            git commit -m "Bump version to $NEW_VERSION"
-          fi
-        else
-          echo "::warning::package.json not found, creating empty commit"
-          git commit --allow-empty -m "Release version $NEW_VERSION"
-        fi
-        
-        echo "::debug::Creating version tag"
+        # Create tag directly on the current commit
+        echo "::debug::Creating tag $NEW_VERSION"
         git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
-        
-        echo "::debug::Pushing release branch and tag"
-        git push origin release/$NEW_VERSION
         git push origin "$NEW_VERSION"
-
-    - name: Create Pull Request to main
-      shell: bash
-      run: |
-        NEW_VERSION=${{ steps.version.outputs.new }}
-        echo "::debug::Creating PR to main for version $NEW_VERSION"
-        PR_TITLE="Release $NEW_VERSION"
-        PR_BODY="This PR is automatically generated to merge the release $NEW_VERSION into main.
-
-        Changes in this release:
-        ${{ steps.pr_info.outputs.pr_title }}"
         
-        echo "::debug::PR Title: $PR_TITLE"
-        echo "::debug::PR Body: $PR_BODY"
-        
-        PR_RESPONSE=$(curl -s -X POST \
-          -H "Authorization: token ${{ inputs.github-token }}" \
-          -H "Accept: application/vnd.github.v3+json" \
-          https://api.github.com/repos/${{ github.repository }}/pulls \
-          -d "{
-            \"title\":\"$PR_TITLE\",
-            \"body\":\"$PR_BODY\",
-            \"head\":\"release/$NEW_VERSION\",
-            \"base\":\"main\"
-          }")
-        
-        echo "::debug::PR Creation Response: $PR_RESPONSE"
-        
-        if [ "$(echo "$PR_RESPONSE" | jq -r '.message')" != "null" ]; then
-          echo "::error::Failed to create PR: $(echo "$PR_RESPONSE" | jq -r '.message')"
-          exit 1
-        fi
+        # Create release branch from the current commit
+        echo "::debug::Creating release branch"
+        git branch "release/$NEW_VERSION" "$COMMIT_SHA"
+        git push origin "release/$NEW_VERSION"
 
     - name: Create GitHub Release
       shell: bash
       run: |
         NEW_VERSION=${{ steps.version.outputs.new }}
-        echo "::debug::Creating GitHub Release for version $NEW_VERSION"
+        echo "::debug::Creating GitHub Release"
         
+        # Create the release using the GitHub API
         RELEASE_RESPONSE=$(curl -s -X POST \
           -H "Authorization: token ${{ inputs.github-token }}" \
           -H "Accept: application/vnd.github.v3+json" \
-          https://api.github.com/repos/${{ github.repository }}/releases \
+          "https://api.github.com/repos/${{ github.repository }}/releases" \
           -d "{
-            \"tag_name\":\"$NEW_VERSION\",
-            \"name\":\"Release $NEW_VERSION\",
-            \"body\":\"Changes in this release:\\n${{ steps.pr_info.outputs.pr_title }}\",
-            \"draft\":false,
-            \"prerelease\":false
+            \"tag_name\": \"$NEW_VERSION\",
+            \"target_commitish\": \"$(git rev-parse HEAD)\",
+            \"name\": \"Release $NEW_VERSION\",
+            \"body\": \"Changes in this release:\\n${{ steps.pr_info.outputs.pr_title }}\",
+            \"draft\": false,
+            \"prerelease\": false
           }")
         
-        echo "::debug::Release Creation Response: $RELEASE_RESPONSE"
+        echo "::debug::Release response: $RELEASE_RESPONSE"
         
-        if [ "$(echo "$RELEASE_RESPONSE" | jq -r '.message')" != "null" ]; then
+        if [ "$(echo "$RELEASE_RESPONSE" | jq -r '.id')" = "null" ]; then
           echo "::error::Failed to create release: $(echo "$RELEASE_RESPONSE" | jq -r '.message')"
           exit 1
         fi
 
-    - name: Create Pull Request to develop
+    - name: Create Pull Requests
       shell: bash
       run: |
         NEW_VERSION=${{ steps.version.outputs.new }}
-        echo "::debug::Creating PR to develop for version $NEW_VERSION"
-        PR_TITLE="Merge release $NEW_VERSION back to develop"
-        PR_BODY="This PR is automatically generated to merge the release changes back into develop.
-
-        Release: $NEW_VERSION"
         
-        echo "::debug::PR Title: $PR_TITLE"
-        echo "::debug::PR Body: $PR_BODY"
-        
-        PR_RESPONSE=$(curl -s -X POST \
+        # Create PR to main
+        echo "::debug::Creating PR to main"
+        PR_TO_MAIN=$(curl -s -X POST \
           -H "Authorization: token ${{ inputs.github-token }}" \
           -H "Accept: application/vnd.github.v3+json" \
-          https://api.github.com/repos/${{ github.repository }}/pulls \
+          "https://api.github.com/repos/${{ github.repository }}/pulls" \
           -d "{
-            \"title\":\"$PR_TITLE\",
-            \"body\":\"$PR_BODY\",
-            \"head\":\"release/$NEW_VERSION\",
-            \"base\":\"develop\"
+            \"title\": \"Release $NEW_VERSION\",
+            \"body\": \"This PR is automatically generated to merge the release $NEW_VERSION into main.\",
+            \"head\": \"release/$NEW_VERSION\",
+            \"base\": \"main\"
           }")
         
-        echo "::debug::PR Creation Response: $PR_RESPONSE"
+        # Create PR to develop
+        echo "::debug::Creating PR to develop"
+        PR_TO_DEVELOP=$(curl -s -X POST \
+          -H "Authorization: token ${{ inputs.github-token }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${{ github.repository }}/pulls" \
+          -d "{
+            \"title\": \"Merge release $NEW_VERSION back to develop\",
+            \"body\": \"This PR is automatically generated to merge the release changes back into develop.\",
+            \"head\": \"release/$NEW_VERSION\",
+            \"base\": \"develop\"
+          }")
         
-        if [ "$(echo "$PR_RESPONSE" | jq -r '.message')" != "null" ]; then
-          echo "::error::Failed to create PR: $(echo "$PR_RESPONSE" | jq -r '.message')"
+        # Check for errors
+        if [ "$(echo "$PR_TO_MAIN" | jq -r '.number')" = "null" ]; then
+          echo "::error::Failed to create PR to main: $(echo "$PR_TO_MAIN" | jq -r '.message')"
+          exit 1
+        fi
+        
+        if [ "$(echo "$PR_TO_DEVELOP" | jq -r '.number')" = "null" ]; then
+          echo "::error::Failed to create PR to develop: $(echo "$PR_TO_DEVELOP" | jq -r '.message')"
           exit 1
         fi
 
