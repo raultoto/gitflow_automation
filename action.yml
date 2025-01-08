@@ -7,9 +7,9 @@ inputs:
     description: 'GitHub token for authentication'
     required: true
   version-files:
-    description: 'Comma-separated list of files to update version in (e.g., package.json,VERSION)'
+    description: 'Comma-separated list of files to update version in (e.g., package.json)'
     required: false
-    default: 'package.json,VERSION'
+    default: 'package.json'
 
 runs:
   using: 'composite'
@@ -120,33 +120,14 @@ runs:
         echo "::debug::Creating release branch for version $NEW_VERSION"
         git checkout -b release/$NEW_VERSION
         
-        echo "::debug::Updating version in files"
-        IFS=',' read -ra FILES <<< "${{ inputs.version-files }}"
-        CHANGES_MADE=false
-        
-        for file in "${FILES[@]}"; do
-          if [ -f "$file" ]; then
-            echo "::debug::Updating version in $file"
-            if [ "$file" = "package.json" ]; then
-              sed -i 's/"version": ".*"/"version": "'${NEW_VERSION#v}'"/g' "$file"
-              CHANGES_MADE=true
-            else
-              echo "$NEW_VERSION" > "$file"
-              CHANGES_MADE=true
-            fi
-          else
-            echo "::warning::File $file not found, creating it"
-            echo "$NEW_VERSION" > "$file"
-            CHANGES_MADE=true
-          fi
-        done
-        
-        if [ "$CHANGES_MADE" = true ]; then
-          echo "::debug::Committing version bump"
-          git add .
+        echo "::debug::Updating version in package.json"
+        if [ -f "package.json" ]; then
+          sed -i 's/"version": ".*"/"version": "'${NEW_VERSION#v}'"/g' package.json
+          echo "::debug::Version updated in package.json"
+          git add package.json
           git commit -m "Bump version to $NEW_VERSION"
         else
-          echo "::debug::No files were modified, creating empty commit"
+          echo "::warning::package.json not found, creating empty commit"
           git commit --allow-empty -m "Release version $NEW_VERSION"
         fi
         
