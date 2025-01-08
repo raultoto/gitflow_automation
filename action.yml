@@ -118,14 +118,42 @@ runs:
       run: |
         NEW_VERSION=${{ steps.version.outputs.new }}
         echo "::debug::Creating release branch for version $NEW_VERSION"
+        
+        # Ensure we're on the latest develop
+        echo "::debug::Fetching latest changes from develop"
+        git fetch origin develop
+        git checkout develop
+        git pull origin develop
+        
+        echo "::debug::Creating and switching to release branch"
         git checkout -b release/$NEW_VERSION
         
-        echo "::debug::Updating version in package.json"
+        echo "::debug::Checking for package.json"
         if [ -f "package.json" ]; then
-          sed -i 's/"version": ".*"/"version": "'${NEW_VERSION#v}'"/g' package.json
-          echo "::debug::Version updated in package.json"
+          echo "::debug::Found package.json, current contents:"
+          cat package.json
+          
+          echo "::debug::Updating version in package.json"
+          # Use perl instead of sed for better cross-platform compatibility
+          perl -i -pe 's/"version": ".*"/"version": "'${NEW_VERSION#v}'"/' package.json
+          
+          echo "::debug::Updated package.json contents:"
+          cat package.json
+          
+          echo "::debug::Checking git status"
+          git status
+          
+          echo "::debug::Adding package.json to git"
           git add package.json
-          git commit -m "Bump version to $NEW_VERSION"
+          
+          echo "::debug::Committing changes"
+          if git diff --cached --quiet; then
+            echo "::warning::No changes detected in package.json, creating empty commit"
+            git commit --allow-empty -m "Release version $NEW_VERSION"
+          else
+            echo "::debug::Changes detected, creating commit"
+            git commit -m "Bump version to $NEW_VERSION"
+          fi
         else
           echo "::warning::package.json not found, creating empty commit"
           git commit --allow-empty -m "Release version $NEW_VERSION"
