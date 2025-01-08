@@ -26,6 +26,10 @@ inputs:
     description: 'Development branch name'
     required: false
     default: 'develop'
+  initial-version:
+    description: 'Initial version to use if no tags exist'
+    required: false
+    default: '0.1.0'
 
 outputs:
   new-version:
@@ -43,21 +47,26 @@ runs:
       run: |
         git config user.name github-actions
         git config user.email github-actions@github.com
+        # Fetch all tags to ensure we have the complete history
+        git fetch --tags
 
     - name: Get merged PR information
       id: pr_info
       shell: bash
       run: |
-        PR_NUMBER=$(git log -1 --pretty=%B | grep -oP '#\K\d+')
+        PR_NUMBER=$(git log -1 --pretty=%B | grep -oP '#\K\d+' || echo "")
         if [ -z "$PR_NUMBER" ]; then
-          echo "No PR number found in the commit message."
-          exit 1
+          echo "Warning: No PR number found in the commit message. Using default labels."
+          echo "pr_number=0" >> $GITHUB_OUTPUT
+          echo "pr_title=Manual Release" >> $GITHUB_OUTPUT
+          echo "pr_labels=patch" >> $GITHUB_OUTPUT
+        else
+          PR_INFO=$(curl -s -H "Authorization: token ${{ inputs.github-token }}" \
+                    "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER")
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "pr_title=$(echo $PR_INFO | jq -r .title)" >> $GITHUB_OUTPUT
+          echo "pr_labels=$(echo $PR_INFO | jq -r '[.labels[].name] | join(",")')" >> $GITHUB_OUTPUT
         fi
-        PR_INFO=$(curl -s -H "Authorization: token ${{ inputs.github-token }}" \
-                  "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER")
-        echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-        echo "pr_title=$(echo $PR_INFO | jq -r .title)" >> $GITHUB_OUTPUT
-        echo "pr_labels=$(echo $PR_INFO | jq -r '[.labels[].name] | join(",")')" >> $GITHUB_OUTPUT
 
     - name: Determine version bump
       id: bump
@@ -76,10 +85,15 @@ runs:
       id: version
       shell: bash
       run: |
-        CURRENT_VERSION=$(git tag -l "v*" --sort=-v:refname | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+($|-)" | head -n1)
+        # Try to get the latest version tag
+        CURRENT_VERSION=$(git tag -l "v*" --sort=-v:refname | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+($|-)" | head -n1 || echo "")
+        
+        # If no version tag exists, use the initial version
         if [ -z "$CURRENT_VERSION" ]; then
-          CURRENT_VERSION="v0.0.0"
+          CURRENT_VERSION="v${{ inputs.initial-version }}"
+          echo "No existing version tags found. Using initial version: $CURRENT_VERSION"
         fi
+        
         echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
         
         VERSION_REGEX="^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z-]+)?(\+[0-9A-Za-z-]+)?$"
@@ -87,8 +101,8 @@ runs:
           major="${BASH_REMATCH[1]}"
           minor="${BASH_REMATCH[2]}"
           patch="${BASH_REMATCH[3]}"
-          prerelease="${BASH_REMATCH[4]}"
-          buildmetadata="${BASH_REMATCH[5]}"
+          prerelease="${BASH_REMATCH[4]:-}"
+          buildmetadata="${BASH_REMATCH[5]:-}"
         else
           echo "Error: Invalid version format"
           exit 1
@@ -99,16 +113,13 @@ runs:
             major=$((major + 1))
             minor=0
             patch=0
-            prerelease=""
             ;;
           minor)
             minor=$((minor + 1))
             patch=0
-            prerelease=""
             ;;
           patch)
             patch=$((patch + 1))
-            prerelease=""
             ;;
         esac
         
@@ -131,7 +142,7 @@ runs:
             if [[ "$file" == *"package.json" ]]; then
               sed -i 's/"version": ".*"/"version": "'${NEW_VERSION#v}'"/g' "$file"
             else
-              echo "$NEW_VERSION" > "$file"
+              echo "${NEW_VERSION#v}" > "$file"
             fi
           fi
         done
