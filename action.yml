@@ -122,28 +122,40 @@ runs:
         
         echo "::debug::Updating version in files"
         IFS=',' read -ra FILES <<< "${{ inputs.version-files }}"
+        CHANGES_MADE=false
+        
         for file in "${FILES[@]}"; do
           if [ -f "$file" ]; then
             echo "::debug::Updating version in $file"
             if [ "$file" = "package.json" ]; then
               sed -i 's/"version": ".*"/"version": "'${NEW_VERSION#v}'"/g' "$file"
+              CHANGES_MADE=true
             else
               echo "$NEW_VERSION" > "$file"
+              CHANGES_MADE=true
             fi
           else
-            echo "::warning::File $file not found"
+            echo "::warning::File $file not found, creating it"
+            echo "$NEW_VERSION" > "$file"
+            CHANGES_MADE=true
           fi
         done
         
-        echo "::debug::Committing version bump"
-        git add .
-        git commit -m "Bump version to $NEW_VERSION"
+        if [ "$CHANGES_MADE" = true ]; then
+          echo "::debug::Committing version bump"
+          git add .
+          git commit -m "Bump version to $NEW_VERSION"
+        else
+          echo "::debug::No files were modified, creating empty commit"
+          git commit --allow-empty -m "Release version $NEW_VERSION"
+        fi
         
-        echo "::debug::Pushing release branch"
-        git push origin release/$NEW_VERSION || {
-          echo "::error::Failed to push release branch"
-          exit 1
-        }
+        echo "::debug::Creating version tag"
+        git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
+        
+        echo "::debug::Pushing release branch and tag"
+        git push origin release/$NEW_VERSION
+        git push origin "$NEW_VERSION"
 
     - name: Create Pull Request to main
       shell: bash
