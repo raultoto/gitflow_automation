@@ -1,4 +1,4 @@
-name: 'GitFlow Automation Using PR Auto Classifier Action'
+name: 'GitFlow Automation'
 description: 'Automates GitFlow release process including version management and PR creation'
 author: 'Your Name'
 
@@ -10,14 +10,6 @@ inputs:
   github-token:
     description: 'GitHub token with repository access'
     required: true
-  version-files:
-    description: 'Comma-separated list of files to update version in (e.g., package.json,VERSION)'
-    required: false
-    default: 'VERSION'
-  version-regex:
-    description: 'Regex pattern to find version in files'
-    required: false
-    default: 'version": "(.*)"'
   base-branch:
     description: 'Base branch for the release PR (usually main)'
     required: false
@@ -26,18 +18,22 @@ inputs:
     description: 'Development branch name'
     required: false
     default: 'develop'
+  version-files:
+    description: 'Comma-separated list of files to update version in (e.g., package.json,VERSION)'
+    required: false
+    default: 'VERSION'
   initial-version:
     description: 'Initial version to use if no tags exist'
     required: false
-    default: '0.1.0'
+    default: '0.0.0'
 
 outputs:
   new-version:
     description: 'The new version number created'
-  release-branch:
-    description: 'The name of the created release branch'
   version-bump:
     description: 'Type of version bump performed (major/minor/patch)'
+  release-branch:
+    description: 'Name of the created release branch'
 
 runs:
   using: 'composite'
@@ -47,21 +43,20 @@ runs:
       run: |
         git config user.name github-actions
         git config user.email github-actions@github.com
-        # Fetch all tags to ensure we have the complete history
-        git fetch --tags
+        git fetch --tags --force
 
     - name: Get merged PR information
       id: pr_info
       shell: bash
       run: |
-        PR_NUMBER=$(git log -1 --pretty=%B | grep -oP '#\K\d+' || echo "")
+        PR_NUMBER=$(git log -1 --pretty=%B | grep -oP '#\K\d+')
         if [ -z "$PR_NUMBER" ]; then
-          echo "Warning: No PR number found in the commit message. Using default labels."
+          echo "No PR number found in the commit message."
           echo "pr_number=0" >> $GITHUB_OUTPUT
           echo "pr_title=Manual Release" >> $GITHUB_OUTPUT
           echo "pr_labels=patch" >> $GITHUB_OUTPUT
         else
-          PR_INFO=$(curl -s -H "Authorization: token ${{ inputs.github-token }}" \
+          PR_INFO=$(curl -s -H "Authorization: Bearer ${{ inputs.github-token }}" \
                     "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER")
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           echo "pr_title=$(echo $PR_INFO | jq -r .title)" >> $GITHUB_OUTPUT
@@ -80,20 +75,16 @@ runs:
         else
           echo "bump=patch" >> $GITHUB_OUTPUT
         fi
+        echo "version-bump=${{ steps.bump.outputs.bump }}" >> $GITHUB_OUTPUT
 
-    - name: Calculate new version
+    - name: Get current version and bump
       id: version
       shell: bash
       run: |
-        # Try to get the latest version tag
-        CURRENT_VERSION=$(git tag -l "v*" --sort=-v:refname | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+($|-)" | head -n1 || echo "")
-        
-        # If no version tag exists, use the initial version
+        CURRENT_VERSION=$(git tag -l "v*" --sort=-v:refname | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+($|-)" | head -n1)
         if [ -z "$CURRENT_VERSION" ]; then
           CURRENT_VERSION="v${{ inputs.initial-version }}"
-          echo "No existing version tags found. Using initial version: $CURRENT_VERSION"
         fi
-        
         echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
         
         VERSION_REGEX="^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z-]+)?(\+[0-9A-Za-z-]+)?$"
@@ -113,26 +104,32 @@ runs:
             major=$((major + 1))
             minor=0
             patch=0
+            prerelease=""
             ;;
           minor)
             minor=$((minor + 1))
             patch=0
+            prerelease=""
             ;;
           patch)
             patch=$((patch + 1))
+            prerelease=""
             ;;
         esac
         
         NEW_VERSION="v$major.$minor.$patch$prerelease$buildmetadata"
         echo "new=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "new-version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "New version will be: $NEW_VERSION"
 
     - name: Create release branch
       shell: bash
       run: |
         NEW_VERSION=${{ steps.version.outputs.new }}
         git checkout -b release/$NEW_VERSION
+        echo "release-branch=release/$NEW_VERSION" >> $GITHUB_OUTPUT
 
-    - name: Update version files
+    - name: Update version in files
       shell: bash
       run: |
         NEW_VERSION=${{ steps.version.outputs.new }}
@@ -147,7 +144,7 @@ runs:
           fi
         done
 
-    - name: Commit changes
+    - name: Commit version bump
       id: commit
       shell: bash
       run: |
@@ -177,7 +174,7 @@ runs:
         ${{ steps.pr_info.outputs.pr_title }}"
         
         curl -X POST \
-          -H "Authorization: token ${{ inputs.github-token }}" \
+          -H "Authorization: Bearer ${{ inputs.github-token }}" \
           -H "Accept: application/vnd.github.v3+json" \
           https://api.github.com/repos/${{ github.repository }}/pulls \
           -d "{
@@ -195,7 +192,7 @@ runs:
         ${{ steps.pr_info.outputs.pr_title }}"
         
         curl -X POST \
-          -H "Authorization: token ${{ inputs.github-token }}" \
+          -H "Authorization: Bearer ${{ inputs.github-token }}" \
           -H "Accept: application/vnd.github.v3+json" \
           https://api.github.com/repos/${{ github.repository }}/releases \
           -d "{
@@ -215,7 +212,7 @@ runs:
         Release: ${{ steps.version.outputs.new }}"
         
         curl -X POST \
-          -H "Authorization: token ${{ inputs.github-token }}" \
+          -H "Authorization: Bearer ${{ inputs.github-token }}" \
           -H "Accept: application/vnd.github.v3+json" \
           https://api.github.com/repos/${{ github.repository }}/pulls \
           -d "{
