@@ -144,47 +144,7 @@ runs:
           exit 1
         fi
 
-    - name: Create Pull Requests
-      shell: bash
-      run: |
-        NEW_VERSION=${{ steps.version.outputs.new }}
-        
-        # Create PR to main
-        echo "::debug::Creating PR to main"
-        PR_TO_MAIN=$(curl -s -X POST \
-          -H "Authorization: token ${{ inputs.github-token }}" \
-          -H "Accept: application/vnd.github.v3+json" \
-          "https://api.github.com/repos/${{ github.repository }}/pulls" \
-          -d "{
-            \"title\": \"Release $NEW_VERSION\",
-            \"body\": \"This PR is automatically generated to merge the release $NEW_VERSION into main.\",
-            \"head\": \"release/$NEW_VERSION\",
-            \"base\": \"main\"
-          }")
-        
-        # Create PR to develop
-        echo "::debug::Creating PR to develop"
-        PR_TO_DEVELOP=$(curl -s -X POST \
-          -H "Authorization: token ${{ inputs.github-token }}" \
-          -H "Accept: application/vnd.github.v3+json" \
-          "https://api.github.com/repos/${{ github.repository }}/pulls" \
-          -d "{
-            \"title\": \"Merge release $NEW_VERSION back to develop\",
-            \"body\": \"This PR is automatically generated to merge the release changes back into develop.\",
-            \"head\": \"release/$NEW_VERSION\",
-            \"base\": \"develop\"
-          }")
-        
-        # Check for errors
-        if [ "$(echo "$PR_TO_MAIN" | jq -r '.number')" = "null" ]; then
-          echo "::error::Failed to create PR to main: $(echo "$PR_TO_MAIN" | jq -r '.message')"
-          exit 1
-        fi
-        
-        if [ "$(echo "$PR_TO_DEVELOP" | jq -r '.number')" = "null" ]; then
-          echo "::error::Failed to create PR to develop: $(echo "$PR_TO_DEVELOP" | jq -r '.message')"
-          exit 1
-        fi
+    
 
 branding:
   icon: 'git-branch'
