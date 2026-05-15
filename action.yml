@@ -1,5 +1,5 @@
 name: 'GitFlow Automation Using PR Auto Classifier Action'
-description: 'Tag-driven GitFlow release automation: bumps version from merged PR labels, tags, creates a release branch and a GitHub Release. Bootstraps the first release automatically when no tag exists.'
+description: 'GitFlow release automation: PR-label semver bumps, tags, release branch and GitHub Release. Auto-bootstraps first tag.'
 author: 'raultoto'
 
 inputs:
