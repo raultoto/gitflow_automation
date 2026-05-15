@@ -1,151 +1,323 @@
 name: 'GitFlow Automation Using PR Auto Classifier Action'
-description: 'Automates GitFlow release process with version bumping and PR creation'
+description: 'Tag-driven GitFlow release automation: bumps version from merged PR labels, tags, creates a release branch and a GitHub Release. Bootstraps the first release automatically when no tag exists.'
 author: 'raultoto'
 
 inputs:
   github-token:
-    description: 'GitHub token for authentication'
+    description: 'GitHub token for authentication.'
     required: true
+  initial-version:
+    description: 'Version used to bootstrap the FIRST release when the repo has no prior semver tag. Used as-is (no bump applied).'
+    required: false
+    default: 'v1.0.0'
+  tag-prefix:
+    description: 'Prefix prepended to the new tag when the repo has no prior tag (e.g. "v", "" or "@scope/pkg@"). When prior tags exist, their prefix is reused unless auto-detect-prefix=false.'
+    required: false
+    default: 'v'
+  auto-detect-prefix:
+    description: 'When true (default), the prefix of the most recent semver tag is reused (e.g. a repo with "0.0.2" keeps producing "0.0.3"). When false, only tag-prefix is honored.'
+    required: false
+    default: 'true'
+  release-branch-prefix:
+    description: 'Prefix used for the created release branch.'
+    required: false
+    default: 'release/'
+  major-label:
+    description: 'PR label that triggers a major bump.'
+    required: false
+    default: 'major'
+  minor-label:
+    description: 'PR label that triggers a minor bump.'
+    required: false
+    default: 'minor'
+  patch-label:
+    description: 'PR label that triggers a patch bump.'
+    required: false
+    default: 'patch'
+  prerelease-label:
+    description: 'PR label that marks the GitHub Release as prerelease.'
+    required: false
+    default: 'prerelease'
+  default-bump:
+    description: 'Bump applied when no bump label is present. One of: major, minor, patch, none. "none" skips the release (does not apply to bootstrap).'
+    required: false
+    default: 'patch'
+  dry-run:
+    description: 'When "true", computes everything and logs each action, but does not push tags, branches or releases.'
+    required: false
+    default: 'false'
+
+outputs:
+  new-version:
+    description: 'The full tag for the new release (includes detected/configured prefix).'
+    value: ${{ steps.version.outputs.new }}
+  previous-version:
+    description: 'The full tag of the previous release. Empty if this was a bootstrap.'
+    value: ${{ steps.version.outputs.previous }}
+  bump-type:
+    description: 'major | minor | patch | initial | skipped.'
+    value: ${{ steps.bump.outputs.type }}
+  release-branch:
+    description: 'Name of the release branch that was created.'
+    value: ${{ steps.release.outputs.branch }}
+  release-url:
+    description: 'HTML URL of the GitHub Release that was created.'
+    value: ${{ steps.release.outputs.url }}
+  pr-number:
+    description: 'PR number that triggered the release, or empty if it could not be resolved.'
+    value: ${{ steps.pr_info.outputs.pr_number }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Setup Git
+    - name: Setup git identity
       shell: bash
       run: |
-        echo "::debug::Setting up git configuration"
-        git config user.name github-actions
-        git config user.email github-actions@github.com
+        set -euo pipefail
+        git config user.name  'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-    - name: Get merged PR information
-      shell: bash
+    - name: Resolve PR information
       id: pr_info
-      run: |
-        echo "::debug::Extracting PR number from commit message"
-        PR_NUMBER=$(git log -1 --pretty=%B | grep -oP '#\K\d+')
-        if [ -z "$PR_NUMBER" ]; then
-          echo "::error::No PR number found in the commit message."
-          exit 1
-        fi
-        echo "::debug::Found PR number: $PR_NUMBER"
-        
-        echo "::debug::Fetching PR information from GitHub API"
-        PR_INFO=$(curl -s -H "Authorization: token ${{ inputs.github-token }}" \
-                  "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER")
-        
-        if [ "$(echo "$PR_INFO" | jq -r '.message')" = "Not Found" ]; then
-          echo "::error::PR not found or API request failed"
-          exit 1
-        fi
-        
-        echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-        echo "pr_title=$(echo $PR_INFO | jq -r .title)" >> $GITHUB_OUTPUT
-        echo "pr_labels=$(echo $PR_INFO | jq -r '[.labels[].name] | join(",")')" >> $GITHUB_OUTPUT
-
-    - name: Determine version bump
       shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        SHA="$(git rev-parse HEAD)"
+        echo "::debug::HEAD commit: $SHA"
+
+        # 1) Canonical "(#NN)" suffix from squash/merge commit subjects.
+        SUBJECT="$(git log -1 --pretty=%s)"
+        PR_NUMBER="$(printf '%s' "$SUBJECT" | grep -oE '\(#[0-9]+\)' | tail -n1 | grep -oE '[0-9]+' || true)"
+
+        # 2) Fallback: ask the API which PRs are associated with this commit (handles rebase merges).
+        if [ -z "${PR_NUMBER:-}" ]; then
+          echo "::debug::No '(#N)' on subject. Falling back to /commits/{sha}/pulls."
+          PR_NUMBER="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/commits/${SHA}/pulls" \
+            --jq '[.[] | select(.merged_at != null)][0].number' 2>/dev/null || true)"
+        fi
+
+        if [ -z "${PR_NUMBER:-}" ] || [ "$PR_NUMBER" = "null" ]; then
+          echo "::warning::No merged PR found for $SHA. Using default bump and empty PR metadata."
+          { echo "pr_number="; echo "pr_title="; echo "pr_labels="; } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        PR_INFO="$(gh api \
+          -H 'Accept: application/vnd.github+json' \
+          "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+
+        {
+          echo "pr_number=$PR_NUMBER"
+          echo "pr_title=$(jq -r '.title // ""' <<< "$PR_INFO")"
+          echo "pr_labels=$(jq -r '[.labels[].name] | join(",")' <<< "$PR_INFO")"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Determine bump type
       id: bump
+      shell: bash
+      env:
+        LABELS_CSV: ${{ steps.pr_info.outputs.pr_labels }}
+        MAJOR_LABEL: ${{ inputs.major-label }}
+        MINOR_LABEL: ${{ inputs.minor-label }}
+        PATCH_LABEL: ${{ inputs.patch-label }}
+        PRERELEASE_LABEL: ${{ inputs.prerelease-label }}
+        DEFAULT_BUMP: ${{ inputs.default-bump }}
       run: |
-        LABELS="${{ steps.pr_info.outputs.pr_labels }}"
-        echo "::debug::Processing PR labels: $LABELS"
-        if [[ $LABELS == *"major"* ]]; then
-          echo "bump=major" >> $GITHUB_OUTPUT
-        elif [[ $LABELS == *"minor"* ]]; then
-          echo "bump=minor" >> $GITHUB_OUTPUT
-        else
-          echo "bump=patch" >> $GITHUB_OUTPUT
+        set -euo pipefail
+
+        # Exact-match label lookup (split on comma). Never substring.
+        has_label() {
+          local needle="$1"
+          IFS=',' read -ra arr <<< "${LABELS_CSV:-}"
+          for l in "${arr[@]}"; do
+            [ "$l" = "$needle" ] && return 0
+          done
+          return 1
+        }
+
+        if   has_label "$MAJOR_LABEL"; then BUMP="major"
+        elif has_label "$MINOR_LABEL"; then BUMP="minor"
+        elif has_label "$PATCH_LABEL"; then BUMP="patch"
+        else BUMP="$DEFAULT_BUMP"
         fi
 
-    - name: Get current version and bump
-      shell: bash
+        if [ "$BUMP" = "none" ]; then
+          echo "::notice::No bump label and default-bump=none → skipping release."
+          { echo "type=skipped"; echo "prerelease=false"; } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        case "$BUMP" in major|minor|patch) ;; *) echo "::error::Invalid bump: $BUMP"; exit 1;; esac
+
+        PRERELEASE="false"
+        if has_label "$PRERELEASE_LABEL"; then PRERELEASE="true"; fi
+
+        echo "::notice::Bump=$BUMP prerelease=$PRERELEASE"
+        { echo "type=$BUMP"; echo "prerelease=$PRERELEASE"; } >> "$GITHUB_OUTPUT"
+
+    - name: Compute next version (auto-bootstrap if no tag)
       id: version
+      if: steps.bump.outputs.type != 'skipped'
+      shell: bash
+      env:
+        BUMP_TYPE: ${{ steps.bump.outputs.type }}
+        CONFIGURED_PREFIX: ${{ inputs.tag-prefix }}
+        AUTO_DETECT_PREFIX: ${{ inputs.auto-detect-prefix }}
+        INITIAL_VERSION: ${{ inputs.initial-version }}
       run: |
-        echo "::debug::Getting latest version tag"
-        CURRENT_VERSION=$(git tag -l "v*" --sort=-v:refname | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+($|-)" | head -n1)
-        if [ -z "$CURRENT_VERSION" ]; then
-          CURRENT_VERSION="v0.0.0"
+        set -euo pipefail
+
+        # Find the latest semver-shaped tag in the repo, with OR without prefix.
+        # Match pattern: optional non-digit prefix + X.Y.Z + optional -prerelease/+meta.
+        SEMVER_RE='^([^0-9]*)([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+
+        # `sort -V` is natural version sort; works regardless of prefix length.
+        LATEST_TAG="$(git tag --list \
+          | awk 'NF' \
+          | grep -E "$SEMVER_RE" \
+          | sort -V \
+          | tail -n1 || true)"
+
+        if [ -z "${LATEST_TAG:-}" ]; then
+          # ─── BOOTSTRAP PATH ───────────────────────────────────────────────
+          # No semver tag exists in the repo. Create the very first one using
+          # initial-version verbatim (no bump applied). The next step will
+          # push it like any other release tag.
+          NEW_TAG="$INITIAL_VERSION"
+          echo "::notice::No prior semver tag found. Bootstrapping first release as '$NEW_TAG' (bump label '$BUMP_TYPE' ignored for bootstrap)."
+          {
+            echo "previous="
+            echo "new=$NEW_TAG"
+            echo "bootstrap=true"
+          } >> "$GITHUB_OUTPUT"
+          # Override bump-type output to "initial" for clarity.
+          echo "type=initial" >> "$GITHUB_OUTPUT"
+          exit 0
         fi
-        echo "::debug::Current version: $CURRENT_VERSION"
-        
-        VERSION_REGEX="^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z-]+)?(\+[0-9A-Za-z-]+)?$"
-        if [[ $CURRENT_VERSION =~ $VERSION_REGEX ]]; then
-          major="${BASH_REMATCH[1]}"
-          minor="${BASH_REMATCH[2]}"
-          patch="${BASH_REMATCH[3]}"
-          prerelease="${BASH_REMATCH[4]}"
-          buildmetadata="${BASH_REMATCH[5]}"
+
+        # ─── NORMAL BUMP PATH ────────────────────────────────────────────────
+        echo "::notice::Latest semver tag found: $LATEST_TAG"
+        [[ "$LATEST_TAG" =~ $SEMVER_RE ]]
+        DETECTED_PREFIX="${BASH_REMATCH[1]}"
+        major="${BASH_REMATCH[2]}"
+        minor="${BASH_REMATCH[3]}"
+        patch="${BASH_REMATCH[4]}"
+        # NOTE: prerelease/build metadata from BASH_REMATCH[5]/[6] are intentionally dropped.
+
+        # Choose which prefix to use for the NEW tag.
+        if [ "$AUTO_DETECT_PREFIX" = "true" ]; then
+          USE_PREFIX="$DETECTED_PREFIX"
+          if [ "$DETECTED_PREFIX" != "$CONFIGURED_PREFIX" ]; then
+            echo "::notice::Detected prefix '${DETECTED_PREFIX}' from latest tag (configured was '${CONFIGURED_PREFIX}'). Reusing detected prefix for continuity."
+          fi
         else
-          echo "::error::Invalid version format"
-          exit 1
+          USE_PREFIX="$CONFIGURED_PREFIX"
         fi
-        
-        case "${{ steps.bump.outputs.bump }}" in
-          major)
-            major=$((major + 1))
-            minor=0
-            patch=0
-            ;;
-          minor)
-            minor=$((minor + 1))
-            patch=0
-            ;;
-          patch)
-            patch=$((patch + 1))
-            ;;
+
+        case "$BUMP_TYPE" in
+          major) major=$((major + 1)); minor=0; patch=0 ;;
+          minor) minor=$((minor + 1)); patch=0 ;;
+          patch) patch=$((patch + 1)) ;;
         esac
-        
-        NEW_VERSION="v$major.$minor.$patch$prerelease$buildmetadata"
-        echo "new=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-    - name: Create Release Branch and Tag
-      shell: bash
-      run: |
-        NEW_VERSION=${{ steps.version.outputs.new }}
-        echo "::debug::Creating release for version $NEW_VERSION"
-        
-        # Get the current commit SHA
-        COMMIT_SHA=$(git rev-parse HEAD)
-        echo "::debug::Current commit SHA: $COMMIT_SHA"
-        
-        # Create tag directly on the current commit
-        echo "::debug::Creating tag $NEW_VERSION"
-        git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
-        git push origin "$NEW_VERSION"
-        
-        # Create release branch from the current commit
-        echo "::debug::Creating release branch"
-        git branch "release/$NEW_VERSION" "$COMMIT_SHA"
-        git push origin "release/$NEW_VERSION"
+        NEW_TAG="${USE_PREFIX}${major}.${minor}.${patch}"
+        echo "::notice::Bumping $LATEST_TAG → $NEW_TAG"
+        {
+          echo "previous=$LATEST_TAG"
+          echo "new=$NEW_TAG"
+          echo "bootstrap=false"
+        } >> "$GITHUB_OUTPUT"
 
-    - name: Create GitHub Release
+    - name: Create tag, release branch and GitHub Release
+      id: release
+      if: steps.bump.outputs.type != 'skipped'
       shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        NEW_VERSION: ${{ steps.version.outputs.new }}
+        PREVIOUS_VERSION: ${{ steps.version.outputs.previous }}
+        IS_BOOTSTRAP: ${{ steps.version.outputs.bootstrap }}
+        BRANCH_PREFIX: ${{ inputs.release-branch-prefix }}
+        PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+        PR_TITLE: ${{ steps.pr_info.outputs.pr_title }}
+        IS_PRERELEASE: ${{ steps.bump.outputs.prerelease }}
+        DRY_RUN: ${{ inputs.dry-run }}
       run: |
-        NEW_VERSION=${{ steps.version.outputs.new }}
-        echo "::debug::Creating GitHub Release"
-        
-        # Create the release using the GitHub API
-        RELEASE_RESPONSE=$(curl -s -X POST \
-          -H "Authorization: token ${{ inputs.github-token }}" \
-          -H "Accept: application/vnd.github.v3+json" \
-          "https://api.github.com/repos/${{ github.repository }}/releases" \
-          -d "{
-            \"tag_name\": \"$NEW_VERSION\",
-            \"target_commitish\": \"$(git rev-parse HEAD)\",
-            \"name\": \"Release $NEW_VERSION\",
-            \"body\": \"Changes in this release:\\n${{ steps.pr_info.outputs.pr_title }}\",
-            \"draft\": false,
-            \"prerelease\": false
-          }")
-        
-        echo "::debug::Release response: $RELEASE_RESPONSE"
-        
-        if [ "$(echo "$RELEASE_RESPONSE" | jq -r '.id')" = "null" ]; then
-          echo "::error::Failed to create release: $(echo "$RELEASE_RESPONSE" | jq -r '.message')"
-          exit 1
+        set -euo pipefail
+
+        SHA="$(git rev-parse HEAD)"
+        RELEASE_BRANCH="${BRANCH_PREFIX}${NEW_VERSION}"
+
+        if [ "$DRY_RUN" = "true" ]; then
+          echo "::notice::DRY RUN — would tag '$NEW_VERSION' at $SHA, create branch '$RELEASE_BRANCH', GitHub Release (prerelease=$IS_PRERELEASE). bootstrap=$IS_BOOTSTRAP"
+          { echo "branch=$RELEASE_BRANCH"; echo "url="; } >> "$GITHUB_OUTPUT"
+          exit 0
         fi
 
-    
+        # --- Tag (idempotent) ---
+        if git rev-parse -q --verify "refs/tags/$NEW_VERSION" >/dev/null; then
+          echo "::warning::Tag '$NEW_VERSION' already exists locally; skipping creation."
+        else
+          if [ "$IS_BOOTSTRAP" = "true" ]; then
+            MSG="Initial release $NEW_VERSION"
+          else
+            MSG="Release $NEW_VERSION"
+          fi
+          if [ -n "${PR_NUMBER:-}" ]; then
+            MSG="$MSG (#$PR_NUMBER: ${PR_TITLE:-})"
+          fi
+          git tag -a "$NEW_VERSION" -m "$MSG"
+          git push origin "$NEW_VERSION"
+          echo "::notice::Pushed tag $NEW_VERSION"
+        fi
+
+        # --- Release branch (idempotent) ---
+        if git ls-remote --exit-code --heads origin "$RELEASE_BRANCH" >/dev/null 2>&1; then
+          echo "::warning::Branch '$RELEASE_BRANCH' already exists on origin; skipping creation."
+        else
+          git branch "$RELEASE_BRANCH" "$SHA"
+          git push origin "$RELEASE_BRANCH"
+          echo "::notice::Pushed branch $RELEASE_BRANCH"
+        fi
+
+        # --- GitHub Release (idempotent, JSON-safe) ---
+        if gh release view "$NEW_VERSION" >/dev/null 2>&1; then
+          RELEASE_URL="$(gh release view "$NEW_VERSION" --json url --jq .url)"
+          echo "::warning::Release '$NEW_VERSION' already exists; reusing $RELEASE_URL."
+        else
+          BODY="$(jq -n \
+            --arg prev "${PREVIOUS_VERSION:-}" \
+            --arg new  "$NEW_VERSION" \
+            --arg pr   "${PR_NUMBER:-}" \
+            --arg ttl  "${PR_TITLE:-}" \
+            --arg boot "$IS_BOOTSTRAP" \
+            '
+              ( if $pr  != "" then "Triggered by #\($pr): \($ttl)\n\n" else "" end )
+              + ( if $boot == "true" then "Initial release \($new) — automatically created as the bootstrap version for this repository."
+                  elif $prev != "" then "Changes from \($prev) to \($new)."
+                  else "Release \($new)." end )
+            ')"
+
+          EXTRA=()
+          [ "$IS_PRERELEASE" = "true" ] && EXTRA+=(--prerelease)
+
+          RELEASE_URL="$(gh release create "$NEW_VERSION" \
+            --target "$SHA" \
+            --title  "Release $NEW_VERSION" \
+            --notes  "$BODY" \
+            "${EXTRA[@]}")"
+        fi
+
+        echo "::notice::Release URL: $RELEASE_URL"
+        {
+          echo "branch=$RELEASE_BRANCH"
+          echo "url=$RELEASE_URL"
+        } >> "$GITHUB_OUTPUT"
 
 branding:
   icon: 'git-branch'
-  color: 'blue' 
+  color: 'blue'
